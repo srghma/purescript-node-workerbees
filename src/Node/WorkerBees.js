@@ -10,9 +10,9 @@ exports.spawnImpl = function(left, right, worker, options, cb) {
     var requirePath = res.filePath.replace(/\\/g, "\\\\");
     var jsEval = res.export
       ? [
-          'var worker = require("' + requirePath + '").' + res.export + ';',
-          'worker.spawn ? worker.spawn() : worker();'
-        ].join('\n')
+        'var worker = require("' + requirePath + '").' + res.export + ';',
+        'worker.spawn ? worker.spawn() : worker();'
+      ].join('\n')
       : 'require("' + requirePath + '")';
     try {
       thread = new workerThreads.Worker(jsEval, {
@@ -41,19 +41,20 @@ exports.makeImpl = function(ctor) {
   var originalFn = Error.prepareStackTrace;
   var worker, workerError, callerFilePath, callerLineNumber;
 
-  Error.prepareStackTrace = function(err, stack) {
+  Error.prepareStackTrace = function(err, stack) { // prob safe, b.c. node is one-threaded
     return stack;
   };
 
   try {
-    var stack = new Error().stack;
+    var stack = new Error().stack; // string OR [CallSite]
 
     do {
       var frame = stack.shift();
       callerFilePath = frame.getFileName();
       callerLineNumber = frame.getLineNumber();
-    } while (callerFilePath === __filename);
+    } while (callerFilePath === __filename); // TODO: debug
 
+    console.log({ stack, callerFilePath, __filename })
     Error.prepareStackTrace = originalFn;
 
   } catch (e) {
@@ -74,10 +75,16 @@ exports.makeImpl = function(ctor) {
 
       var callerModuleLines = buff.toString('utf8').split('\n');
       var callerLine = callerModuleLines[callerLineNumber - 1];
-      var workerName = callerLine.match(new RegExp("^var ([\\p{Ll}_][\\p{L}0-9_']*) = Node_WorkerBees\\.make", "u"));
+      var workerName = callerLine.match(/^var ([\p{Ll}_][\p{L}0-9_']*) = Node_WorkerBees\.make/u);
+      // \p is for Unicode property
+      // \p{Ll} - lowercase letter
+      // \p{L} - letter (lowercase or uppercase)
+      // more here:
+      // - https://www.compart.com/en/unicode/category
+      // - https://unicode.org/reports/tr18/#General_Category_Property
 
       if (workerName) {
-        var exportRegex = new RegExp("^\\s*" + workerName[1] + ":\\s*" + workerName[1]);
+        var exportRegex = new RegExp("^\\s*" + workerName[1] + ":\\s*" + workerName[1]); // \   
         for (var i = callerLineNumber; i < callerModuleLines.length; i++) {
           if (callerModuleLines[i] === "module.exports = {") {
             var exported = callerModuleLines.slice(i).some(function(line) {
@@ -108,7 +115,11 @@ exports.makeImpl = function(ctor) {
 exports.unsafeMakeImpl = function(params) {
   return {
     resolve: function(cb) {
-      cb(void 0, params);
+      cb(void 0, params); // will return 
+
+      // { filePath: outputLocation
+      // , export: "main"
+      // }
     },
     spawn: function() {
       throw new Error("Cannot spawn unsafe worker directly.");

@@ -44,76 +44,102 @@ newtype ThreadId = ThreadId Int
 derive instance eqThreadId :: Eq ThreadId
 derive instance ordThreadId :: Ord ThreadId
 
-type WorkerContext a i o =
+type WorkerContext workerData receiveInput replyOutput =
   { exit :: Effect Unit
-  , receive :: (i -> Effect Unit) -> Effect Unit
-  , reply :: o -> Effect Unit
+  , receive :: (receiveInput -> Effect Unit) -> Effect Unit
+  , reply :: replyOutput -> Effect Unit
   , threadId :: ThreadId
-  , workerData :: a
+  , workerData :: workerData
   }
 
-type WorkerOptions a o =
+type WorkerOptions workerData replyOutput =
   { onError :: Error -> Effect Unit
   , onExit :: Int -> Effect Unit
-  , onMessage :: o -> Effect Unit
-  , workerData :: a
+  , onMessage :: replyOutput -> Effect Unit
+  , workerData :: workerData
   }
 
-type WorkerConstructor a i o = WorkerContext a i o -> Effect Unit
+type WorkerConstructor workerData receiveInput replyOutput = WorkerContext workerData receiveInput replyOutput -> Effect Unit
 
-foreign import data Worker :: Type -> Type -> Type -> Type
+-- foreign import data Worker :: Type -> Type -> Type -> Type
 
-foreign import data WorkerThread :: Type -> Type
+type Worker = 
+  { resolve :: EffectFn2 ErrorOrUndefined { filePath :: String, export :: String } Unit
+  , spawn :: Effect Unit
+  } 
+-- workerData, receiveInput, replyOutput
 
-foreign import makeImpl :: forall a i o. WorkerConstructor a i o -> Worker a i o
+foreign import data WorkerThread :: Type -> Type 
+-- `receive` input
 
-foreign import unsafeMakeImpl :: forall a i o. { filePath :: String, export :: String } -> Worker a i o
+foreign import makeImpl 
+  :: forall workerData receiveInput replyOutput
+  . WorkerConstructor workerData receiveInput replyOutput 
+  -> Worker workerData receiveInput replyOutput
 
-foreign import mainImpl :: forall a i o. WorkerConstructor a i o -> Effect Unit
+foreign import unsafeMakeImpl 
+  :: forall workerData receiveInput replyOutput
+  . { filePath :: String, export :: String }
+  -> Worker workerData receiveInput replyOutput
 
-foreign import spawnImpl :: forall a i o. EffectFn5 (forall x y. x -> Either x y) (forall x y. y -> Either x y) (Worker a i o) (WorkerOptions a o) (Either Error (WorkerThread i) -> Effect Unit) Unit
+foreign import mainImpl :: forall workerData receiveInput replyOutput. WorkerConstructor workerData receiveInput replyOutput -> Effect Unit
 
-foreign import postImpl :: forall i. EffectFn2 i (WorkerThread i) Unit
+foreign import spawnImpl 
+  :: forall workerData receiveInput replyOutput
+  . EffectFn5 (forall x y. x -> Either x y) 
+  (forall x y. y -> Either x y) 
+  (Worker workerData receiveInput replyOutput) 
+  (WorkerOptions workerData replyOutput) 
+  (Either Error (WorkerThread receiveInput) -> Effect Unit) 
+  Unit
 
-foreign import terminateImpl :: forall i. EffectFn4 (forall x y. x -> Either x y) (forall x y. y -> Either x y) (WorkerThread i) (Either Error Unit -> Effect Unit) Unit
+foreign import postImpl :: forall receiveInput. EffectFn2 receiveInput (WorkerThread receiveInput) Unit
 
-foreign import threadId :: forall i. WorkerThread i -> ThreadId
+foreign import terminateImpl
+  :: forall receiveInput
+  . EffectFn4 (forall x y. x -> Either x y) 
+  (forall x y. y -> Either x y) 
+  (WorkerThread receiveInput) 
+  (Either Error Unit -> Effect Unit) 
+  Unit
+
+foreign import threadId :: forall receiveInput. WorkerThread receiveInput -> ThreadId
 
 -- | Builds a new Worker. Treat this like it's special top-level declaration
 -- | syntax. Workers can only be declared at the top-level with `make`, and they
 -- | _must_ be exported. Failing to meet these criteria will result in a runtime
 -- | exception.
-make :: forall a i o. Sendable o => WorkerConstructor a i o -> Worker a i o
+make :: forall workerData receiveInput replyOutput. Sendable replyOutput => WorkerConstructor workerData receiveInput replyOutput -> Worker workerData receiveInput replyOutput
 make = makeImpl
 
-makeAsMain :: forall a i o. Sendable o => WorkerConstructor a i o -> Effect Unit
+makeAsMain :: forall workerData receiveInput replyOutput. Sendable replyOutput => WorkerConstructor workerData receiveInput replyOutput -> Effect Unit
 makeAsMain = mainImpl
 
-unsafeWorkerFromPath :: forall a i o. Sendable o => String -> Worker a i o
+unsafeWorkerFromPath :: forall workerData receiveInput replyOutput. Sendable replyOutput => String -> Worker workerData receiveInput replyOutput
 unsafeWorkerFromPath = unsafeMakeImpl <<< { filePath: _, export: "" }
 
-unsafeWorkerFromPathAndExport :: forall a i o. Sendable o => { filePath :: String, export :: String } -> Worker a i o
+unsafeWorkerFromPathAndExport :: forall workerData receiveInput replyOutput. Sendable replyOutput => { filePath :: String, export :: String } -> Worker workerData receiveInput replyOutput
 unsafeWorkerFromPathAndExport = unsafeMakeImpl
 
 -- | Instantiates a new worker thread. If this worker subscribes to input, it
 -- | will need to be cleaned up with `terminate`, otherwise it will hold your
 -- | process open.
-spawn :: forall a i o. Sendable a => Worker a i o -> WorkerOptions a o -> (Either Error (WorkerThread i) -> Effect Unit) -> Effect Unit
+spawn :: forall workerData receiveInput replyOutput. Sendable workerData => Worker workerData receiveInput replyOutput -> WorkerOptions workerData replyOutput -> (Either Error (WorkerThread receiveInput) -> Effect Unit) -> Effect Unit
 spawn = runEffectFn5 spawnImpl Left Right
 
 -- | Sends some input to a worker thread to process.
-post :: forall i. Sendable i => i -> WorkerThread i -> Effect Unit
+post :: forall receiveInput. Sendable receiveInput => receiveInput -> WorkerThread receiveInput -> Effect Unit
 post = runEffectFn2 postImpl
 
 -- | Terminates the worker thread.
-terminate :: forall i. WorkerThread i -> (Either Error Unit -> Effect Unit) -> Effect Unit
+terminate :: forall receiveInput. WorkerThread receiveInput -> (Either Error Unit -> Effect Unit) -> Effect Unit
 terminate = runEffectFn4 terminateImpl Left Right
 
 -- | Only Sendable things can be sent back and forth between a worker thread and
 -- | its parent. These include things that are represented by JavaScript primitives.
 -- | Arbitrary PureScript values cannot be sent, but variants, records and newtypes
 -- | of these things can. If you have a newtype of some Sendable, you must wrap it.
-class Sendable (a :: Type)
+class Sendable (workerData :: Type)
 
 instance sendableInt :: Sendable Int
 else instance sendableNumber :: Sendable Number
@@ -149,14 +175,15 @@ unwrap (SendWrapper a) = a
 unsafeWrap :: forall a. a -> SendWrapper a
 unsafeWrap = SendWrapper
 
-lift :: forall e a b. (a -> b) -> WorkerConstructor e a b
+lift :: forall workerData receiveInput replyOutput. (receiveInput -> replyOutput) -> WorkerConstructor workerData receiveInput replyOutput
+-- lift :: forall workerData receiveInput replyOutput. (receiveInput -> replyOutput) -> WorkerContext workerData receiveInput replyOutput -> Effect Unit
 lift k { receive, reply } = receive (reply <<< k)
 
-liftReader :: forall e a b. (a -> Reader e b) -> WorkerConstructor e a b
+liftReader :: forall workerData receiveInput replyOutput. (receiveInput -> Reader workerData replyOutput) -> WorkerConstructor workerData receiveInput replyOutput
 liftReader k { receive, reply, workerData } = receive (reply <<< flip runReader workerData <<< k)
 
-liftEffect :: forall e a b. (a -> Effect b) -> WorkerConstructor e a b
+liftEffect :: forall workerData receiveInput replyOutput. (receiveInput -> Effect replyOutput) -> WorkerConstructor workerData receiveInput replyOutput
 liftEffect k { receive, reply } = receive (reply <=< k)
 
-liftReaderT :: forall e a b. (a -> ReaderT e Effect b) -> WorkerConstructor e a b
+liftReaderT :: forall workerData receiveInput replyOutput. (receiveInput -> ReaderT workerData Effect replyOutput) -> WorkerConstructor workerData receiveInput replyOutput
 liftReaderT k { receive, reply, workerData } = receive (reply <=< flip runReaderT workerData <<< k)
